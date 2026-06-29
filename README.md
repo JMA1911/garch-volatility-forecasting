@@ -1,10 +1,10 @@
 # GARCH Volatility Forecasting
 
-## MSc Financial Mathematics – Applied Statistics & Probability Coursework (University of Leeds)
+## MSc Financial Mathematics – Applied Statistics & Probability Project (University of Leeds)
 
 ---
 
-This repository contains the R implementation and report for my MSc Financial Mathematics Applied Statistics & Probability coursework completed at the University of Leeds.
+This repository contains the R implementation and report for my MSc Financial Mathematics Applied Statistics & Probability project completed at the University of Leeds.
 
 The project investigates changes in USD–GBP exchange rate volatility surrounding the 2007–08 financial crisis using ARCH/GARCH time-series models.
 
