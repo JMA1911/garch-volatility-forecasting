@@ -1,0 +1,272 @@
+---
+title: "Applied Statistics and Probability Coursework"
+subtitle: "Task 3"
+author: |
+  Student ID: 201885202
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+\section*{Abstract}
+Our discussion involves selection of a time series model to investigate the change in volatility of the USD-GBP exchange rate before and after the credit crisis. We start by analysis of the data to suggest some potentially suitable models and the parameters we can use. We go on to implement a function to test different model parameters and how they fit to the data. We evaluate their fit through the AIC and find the GARCH(1,1) model to be the best fit. We then fit two models, one to the pre-crisis period and one to the full sample period. We compare the coefficients of our two models to understand the impact of the credit crisis on the USD-GBP exchange rate volatility. Our findings indicate the credit crisis caused a slight increase in volatility clustering, however, there isn't long-term persistence of it's impact on volatility as the average levels of variance return to the pre-crisis level. We say this is likely due to the fact our sample extends to 2012 when levels of uncertainty have began to reduce. 
+
+\section*{Introduction}
+This task involves an investigation of the credit crisis' impact on the change in volatility of the USD-GBP exchange rate before and after the crisis. For simplicity, we assume the credit crisis hit overnight between 31/07/2007 and 01/08/2007. We start by analysis of our return series to select a suitable model to fit for volatility estimation. We go on to fit two models, one for the pre-crisis period and one for the full period including the crisis. We do this, as it allows us to finish by comparing the coefficients of our two models to understand whether the credit crisis has had a long-term impact on any of the properties of the USD-GBP exchange rate volatility. We use information from (Hernandez-Hernandez 2024) throughout, and have specifically cited where key formulas and definitions are mentioned. 
+
+\section*{Initial Data Analysis and Model Selection}
+```{r, echo=FALSE, include=FALSE}
+# Load required libraries
+library(readr)
+library(dplyr)
+library(lubridate)
+library(rugarch)
+library(ggplot2)
+library(zoo)
+library(gridExtra)
+library(FinTS)
+library(tseries)
+library(fGarch)
+library(DescTools)
+```
+
+```{r, echo=FALSE}
+data_start <- read.csv("USD-GBP.csv")
+colnames(data_start) <- c("Date", "Close")
+```
+
+```{r, echo=FALSE}
+# Date formatting
+data_start <- data_start %>%
+  mutate(Date = as.Date(Date, format = "%d/%m/%Y")) %>%
+  arrange(Date)
+```
+We start by doing some preprocessing of the data. We start by defining the pre-crisis period for our later analysis. We then add a column to our dataset for log-returns of the USD-GBP exchange rate. We do this because it makes the data more suitable for modelling purposes later in the report. Arithmetic returns can change by many orders of magnitude over time, so they are less likely to be stationary and approximate a normal distribution. These are key assumptions in the models we will be fitting.
+```{r fig.width=7, fig.height=1.5, fig.align='center'}
+# Separate out a pre-crisis period for later analysis
+credit_crisis_date <- as.Date("2007-07-31")  # Example: Lehman Brothers collapse
+pre_crisis <- filter(data_start, Date <= credit_crisis_date)
+
+# Calculate log-returns
+data_start <- data_start %>%
+  mutate(LogReturn = log(Close) - log(lag(Close))) %>%
+  na.omit()  # Remove NA values from the first lag calculation
+
+# Plot log-returns with red line to show where crisis is
+ggplot(data_start, aes(x = Date, y = LogReturn)) +
+  geom_line() +
+  geom_vline(xintercept = as.numeric(credit_crisis_date), color = "red", linetype = "dashed") +
+  labs(title = "Log Returns of USD-GBP Exchange Rate",
+       x = "Date", y = "Log Return") +
+  scale_y_continuous(expand = expansion(mult = c(0.2, 0.2))) +  # Add padding to the y-axis
+  theme_minimal()
+```
+We go on to plot the log-returns and it can be noticed that earlier in the data there is a massive spike in volatility. This could either be an outlier or due to the burst of the dot-com bubble and the recession that followed. Inclusion of this results in an inability to calculate the statistical significance of coefficients in our later modelling, so we decide to remove this. We decide to remove only this date and not use methods such as winsorization as this cuts out spikes in volatility that may be as a result of the credit crisis. We find the specific date where the spike happens to be 01/01/2001 by looking for values that are 5 standard deviations above the mean.
+
+```{r, results='hide'}
+# Step 1: Set a threshold for massive spike
+threshold <- mean(data_start$LogReturn) + 5 * sd(data_start$LogReturn)
+
+# Step 2: Identify the dates where log returns exceed the threshold
+massive_spikes <- data_start %>%
+  filter(LogReturn > threshold)
+
+# Step 3: Display the dates and log returns of these massive spikes
+massive_spikes[, c("Date", "LogReturn")]
+
+# Step 4: Filter out rows where log returns exceed the threshold
+data <- data_start %>%
+  filter(LogReturn <= threshold & LogReturn >= -threshold)
+```
+
+```{r, echo=FALSE}
+pre_crisis <- filter(data, Date < credit_crisis_date)
+```
+To determine whether our cleaned data follows the stationarity assumption that are models use we implement the Augmented Dickey-Fuller (ADF) test (Dickey 1979). The ADF test is based on the following regression model:
+
+\[
+\Delta y_t = \alpha + \beta t + \gamma y_{t-1} + \sum_{i=1}^{p} \delta_i \Delta y_{t-i} + \varepsilon_t
+\]
+
+\textbf{Null Hypothesis ($H_0$):} The time series has a unit root (non-stationary), i.e., $\gamma = 0$.\
+\textbf{Alternative Hypothesis ($H_a$):} The time series is stationary, i.e., $\gamma < 0$.
+
+To perform the test the regression parameters are estimated using OLS and then the ADF test statistic is computed and compared to the Dickey-Fuller critical values. The test statistic is calculated as follows:
+\[
+\text{ADF Test Statistic} = \frac{\hat{\gamma}}{\text{SE}(\hat{\gamma})}
+\]
+
+We reject $H_0$ if the test statistic is less than the critical value, indicating stationarity; otherwise, fail to reject $H_0$, suggesting non-stationarity.
+
+```{r, warning=FALSE, message=FALSE}
+#Test for stationarity of log-returns using ADF test
+adf.test(data$LogReturn, alternative = "stationary")
+```
+The p-value is less than 0.05 indicating we can reject the null hypothesis at the 5% significance level and conclude that our log-returns series is stationary, thus, suitable for modelling in later sections. We go on to plot the cleaned version of our log-return series, that exlcudes our potential outlier. 
+
+```{r, echo=FALSE, fig.width=7, fig.height=1.5, fig.align='center'}
+# Plot log-returns with red line to show where crisis is
+ggplot(data, aes(x = Date, y = LogReturn)) +
+  geom_line() +
+  geom_vline(xintercept = as.numeric(credit_crisis_date), color = "red", linetype = "dashed") +
+  labs(title = "Log Returns of USD-GBP Exchange Rate",
+       x = "Date", y = "Log Return") +
+  scale_y_continuous(expand = expansion(mult = c(0.2, 0.2))) +  # Add padding to the y-axis
+  theme_minimal()
+```
+Looking at this plot it is clear that the variance of our log-return series is not constant over time, suggesting the use of ARCH/GARCH models is going to be suitable for modelling the effects of the credit crisis on volatility. To determine some potentially suitable parameters for these models we follow the recommendations of (Hernandez-Hernandez 2024). We start by plotting the ACF and PACF of log-returns and log-returns-squared.
+```{r fig.width=7, fig.height=2.5, fig.align='center'}
+# Calculating log-returns-squared
+data <- data %>%
+  mutate(LogReturnSquare = LogReturn^2)
+
+par(mfrow = c(1, 2))
+# Plot ACF
+acf(data$LogReturn, lag.max = 30, main = "ACF of Log-Returns", ci = 0.95)
+acf(data$LogReturnSquare, lag.max = 30, main = "ACF of Log-Returns-Squared", ci = 0.95)
+```
+
+```{r fig.width=7, fig.height=2.5, fig.align='center'}
+par(mfrow = c(1, 2))
+# Plot PACF
+pacf(data$LogReturn, lag.max = 30, main = "PACF of Log-Returns", ci = 0.95)
+pacf(data$LogReturnSquare, lag.max = 30, main = "PACF of Log-Returns-Squared", ci = 0.95)
+```
+
+Looking at the plots of the ACF and PACF of log-returns it appears to be white noise as we see no significant autocorrelation. If we look at the plots of the ACF and PACF of log-returns-squared we see a different result. The PACF doesn't appear to have a significant drop-off suggesting an ARCH model wouldn't be the most suitable here, as the behaviour of the ACF and PACF isn't that of an AR model. The ACF and PACF do appear to somewhat decrease in a geometric fashion, suggesting an ARMA model may be suitable, which suggests a GARCH model may be more suitable in our case. We do, however, still implement a function to test various parameters for ARCH/GARCH models to select the best fit to our data based on the Akaike information criterion (AIC), calculated as follows (Hernandez-Hernandez 2024):
+
+\[
+\text{AIC} = -2\ln(L) + 2k
+\]
+
+where $L$ is the maximum likelihood of the model and $k$ is the number of parameters in the model
+
+```{r, warning=FALSE, message=FALSE}
+find_best_arch_garch <- function(data, max_p = 5, max_q = 5) {
+  # Initialise a dataframe to store AIC values
+  aic_values <- data.frame(p = integer(0), q = integer(0), AIC = numeric(0))
+  
+  # Iterate over possible p and q values
+  for (p in 0:max_p) {
+    for (q in 0:max_q) {
+      # Skip invalid models where p and q are both zero
+      if (p == 0 && q == 0) next
+      
+      # Try fitting the model and catch any errors
+      tryCatch({
+        model <- garch(data$LogReturn, order = c(p, q), trace = FALSE)
+        
+        # If the model is fitted successfully, check the AIC
+        if (!is.null(model)) {
+          current_aic <- AIC(model)
+          
+          # Store the AIC value in the dataframe
+          aic_values <- rbind(aic_values, data.frame(p = p, q = q, AIC = current_aic))
+        }
+      }, error = function(e) {
+        message(paste("Error fitting model with p =", p, "q =", q, ":", e$message))
+      })
+    }
+  }
+  
+  # Display all AIC values for the models tested
+  print(aic_values)
+}
+
+find_best_arch_garch(data, max_p = 2, max_q = 2)
+```
+Looking at the AIC values the GARCH(1,1) model has the lowest so is the best fit to our data, as our earlier analysis of the ACFs and PACF suggested. For this reason we continue with this model for our further analyses.
+
+\section*{Analysis of the Credit Crisis' Impact on USD-GBP Exchange Rate Volatility}
+
+In this section we follow the methodologies seen in (Angabini 2011) and (Khan 2023). To understand the impact of the credit crisis on volatility we fit a GARCH(1,1) model for the pre-crisis period (03/05/2000-01/08/2007) and for the full period (03/05/2000-30/04/2012). We don't include a during the crisis period like in (Khan 2023) due to our assumption that the crisis hits overnight. We obtain and display the coefficients and their respective p-values for both models for comparison to understand the impact of the crisis on the USD-GBP exchange rate volatility. We first provide insight into the formulation of a GARCH(1,1) model, so we can understand how we can compare the model parameters.The conditional variance equation for a GARCH(1,1) model is (Hernandez-Hernandez):
+
+\[
+\sigma_t^2 = \alpha_0 + \alpha_1 \nu_{t-1}^2 + \beta_1 \sigma_{t-1}^2, 
+\]
+\[
+\nu_t = \sigma_t z_t, \quad z_t \sim \mathcal{N}(0, \sigma_{z}^2) \text{ i.i.d.},
+\]
+
+where \( \alpha_0 > 0 \) is the intercept, \( \alpha_1 \geq 0 \) is the lagged squared error coefficient, \( \beta_1 \geq 0 \) is the lagged variance coefficient, \( \nu_t \) is the return, \( \sigma_t \) is the conditional standard deviation, and \( z_t \) is a shock with variance \( \sigma_{z}^2 \).
+
+\subsection*{Interpretation of the Coefficients}
+
+\setlength{\leftmargini}{0pt}
+\begin{itemize}
+    \item \textbf{Volatility Clustering:} A high \(\beta_1\) indicates periods of high volatility followed by high volatility and periods of low volatility followed by low volatility.
+    \item \textbf{Immediate Impact of Shocks:} A large \(\alpha_1\) indicates that recent shocks have a strong immediate effect on volatility.
+    \item \textbf{Long-Term Variance:} Reflects the average level of variance the model predicts when the system is stable.
+    \[
+    \text{Long-Term Variance} = \frac{\alpha_0}{1 - \alpha_1 - \beta_1}, \quad \text{if } \alpha_1 + \beta_1 < 1.
+    \]
+    \item \textbf{Baseline Variance:} If \(\alpha_0\) is small it indicates the model puts greater emphasis on past shocks (\(\alpha_1\))  and past volatility (\(\beta_1\)), so the variance is driven more by dynamic components. 
+\end{itemize}
+
+```{r}
+# Fit GARCH(1,1) model for the pre-crisis period
+pre_crisis_model <- garch(pre_crisis$LogReturn, order = c(1, 1), trace = FALSE)
+
+# Fit GARCH(1,1) model for the full dataset
+full_data_model <- garch(data$LogReturn, order = c(1, 1), trace = FALSE)
+
+# Helper function to extract coefficients, calculate p-values, and compute additional metrics
+extract_p_values_and_metrics <- function(model) {
+  model_summary <- summary(model)
+  
+  # Extract coefficients and standard errors from summary
+  coef <- model_summary$coef[, 1]  # Coefficients
+  se <- model_summary$coef[, 2]    # Standard errors
+  
+  # Calculate t-values and p-values
+  t_values <- coef / se
+  p_values <- 2 * (1 - pnorm(abs(t_values)))  # Two-tailed p-values
+  
+  # Extract alpha0, alpha1, and beta1
+  alpha0 <- coef["a0"]
+  alpha1 <- coef["a1"]
+  beta1 <- coef["b1"]
+  
+  # Sum of alpha1 and beta1
+  sum_alpha_beta <- alpha1 + beta1
+  
+  # Calculate long-term variance
+  long_term_variance <- if (sum_alpha_beta < 1) alpha0 / (1 - sum_alpha_beta) else NA
+  
+  # Display results
+  cat(sprintf("Sum of alpha1 and beta1: %.4f\n", sum_alpha_beta))
+  if (!is.na(long_term_variance)) {
+    cat(sprintf("Long-term variance: %.6f\n", long_term_variance))
+  } else {
+    cat("Long-term variance could not be calculated (non-stationary model).\n")
+  }
+  
+  return(data.frame(Coefficients = coef, `P-Value` = p_values))
+}
+
+# Display coefficients, p-values, and metrics for pre-crisis model
+pre_crisis_results <- extract_p_values_and_metrics(pre_crisis_model)
+pre_crisis_results
+
+# Display coefficients, p-values, and metrics for full dataset model
+full_data_results <- extract_p_values_and_metrics(full_data_model)
+full_data_results
+```
+Looking at the results we see all our coefficients are statistically significant at the 5% level at the very least. From the pre-crisis model and the full sample model we see a decrease in \(\alpha_0\), suggesting post-crisis the minimum variance is lower but the variance is driven more by dynamic components. Looking at \(\alpha_1\), we also see a decrease when the crisis is included in the model. This suggests that recent shocks now have less of an immediate effect on volatility. This may seem strange, however, our full sample does extend past the crisis where the volatility appears to be returning to the pre-crisis levels. Perhaps if we used a smaller sample that didn't extend so far past the credit crisis, it would be amplify it's immediate effects. Either way it indicates that the impact of the crisis on the USD-GBP exchange rate wasn't persistent in the long-run, as the levels of uncertainty must have reduced because recent shocks have less of an impact. Looking at \(\beta_1\), we see a slight increase when the crisis is included in the model. This suggests the crisis has had an impact on volatility clustering, meaning the impact of current volatility on future volatility is more persistent. We can also see both models are stationary as \(\alpha_1 + \beta_1 < 1\). As this condition is satisfied, we can calculate the long-term variance for both models. We find it is slightly smaller for the model that contains the full sample, suggesting the average level of variance is lower when the crisis is included. As mentioned, our sample goes beyond the crisis, so our long-term variance indicates that the volatility of the USD-GBP exchange rate returned to normal levels post-crisis and the impact of the credit crisis on volatility wasn't persistent. 
+
+\section*{Conclusion}
+Overall, we conclude that the credit crisis clearly has a short-term effect on the volatility of the USD-GBP exchange rate; however, the effects aren't persistent in the long-run. Our sample extends past the credit crisis to 2012 and the change in the coefficients of our pre-crisis model and our full sample indicate uncertainty returned to normal levels as recent shocks have less of an impact on volatility in the full model. It also indicates that the average volatility of the exchange rate has slightly declined, so returning to normal levels. We see suggestion that the credit crisis may have increased volatility clustering, however, the change in \(\beta_1\) that indicates this isn't particularly large. 
+
+\section*{References}
+Angabini & Wasiuzzaman (2011). GARCH Models and the Financial Crisis - A Study of the Malaysian Stock Market. The International Journal of Applied Economics and Finance, 5(3), 226-236.
+
+Dickey & Fuller (1976). Distribution of the Estimators for Autoregressive Time Serie with a Unit Root. Journal of the American Statistical Association, 74(366a), 427-431.
+
+Hernandez-Hernandez (2024). Lecture Notes. Applied Probability and Statistics. University of Leeds.
+
+Khan, Kayani, Khan, Mughal, Haseeb (2023). COVID-19 pandemic & financial market volatility: Evidence from GARCH models. Journal of Risk and Financial Management, 16(1), 1-20.
+
+
